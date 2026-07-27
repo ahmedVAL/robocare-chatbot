@@ -24,7 +24,7 @@ import streamlit as st
 #   API_URL = "https://robocare-chatbot.onrender.com/chat"
 API_URL = st.secrets.get("API_URL", os.environ.get("API_URL", "http://127.0.0.1:8000/chat"))
 
-LOGO_PATH = Path(__file__).parent / "Robocaredrone.jpg"
+LOGO_PATH = Path(__file__).parent / "Robocare.ico"
 LOGO_EXISTS = LOGO_PATH.exists()
 
 # Coordonnees de l'entreprise (deja verifiees via le scraping) - affichees
