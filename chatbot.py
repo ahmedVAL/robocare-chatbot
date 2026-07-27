@@ -5,7 +5,7 @@ Serveur FastAPI qui expose un endpoint /chat :
 2. cherche les passages les plus pertinents dans la base vectorielle
 3. envoie la question + les passages a Groq pour generer une reponse
 4. si l'utilisateur demande d'envoyer un email, le modele appelle l'outil
-   send_email (function calling), qui envoie reellement le mail via SMTP
+   send_email (function calling), qui envoie reellement le mail via l'API SendGrid
 5. renvoie la reponse ainsi que les URLs sources utilisees
 
 Lancement : uvicorn chatbot:app --reload
@@ -98,16 +98,13 @@ if not groq_api_key:
     raise RuntimeError("La variable d'environnement GROQ_API_KEY n'est pas definie.")
 groq_client = Groq(api_key=groq_api_key)
 
-SMTP_CONFIG = {
-    "host": os.environ.get("SMTP_HOST"),
-    "port": os.environ.get("SMTP_PORT", "587"),
-    "user": os.environ.get("SMTP_USER"),
-    "password": os.environ.get("SMTP_PASSWORD"),
-    "from_addr": os.environ.get("SMTP_FROM"),
+EMAIL_CONFIG = {
+    "api_key": os.environ.get("SENDGRID_API_KEY"),
+    "sender_email": os.environ.get("SENDGRID_FROM_EMAIL"),
 }
-SMTP_CONFIGURED = all([SMTP_CONFIG["host"], SMTP_CONFIG["user"], SMTP_CONFIG["password"], SMTP_CONFIG["from_addr"]])
-if not SMTP_CONFIGURED:
-    print("⚠️  SMTP non configure dans .env : l'envoi d'email sera indisponible.", flush=True)
+EMAIL_CONFIGURED = all([EMAIL_CONFIG["api_key"], EMAIL_CONFIG["sender_email"]])
+if not EMAIL_CONFIGURED:
+    print("⚠️  SendGrid non configure dans .env : l'envoi d'email sera indisponible.", flush=True)
 
 SYSTEM_PROMPT_TEMPLATE = """Tu es l'assistant virtuel officiel du site web de l'entreprise.
 
@@ -204,12 +201,12 @@ def retrieve_context(question: str, n_results: int = N_RESULTS):
 def execute_send_email_tool(args: dict, sender_ip: str) -> str:
     """Execute reellement l'outil send_email et renvoie un resultat texte
     (succes ou erreur) que le modele va lire pour formuler sa reponse finale."""
-    if not SMTP_CONFIGURED:
+    if not EMAIL_CONFIGURED:
         return json_lib.dumps({"success": False, "error": "L'envoi d'email n'est pas configure sur ce serveur."})
 
     try:
         send_email(
-            smtp_config=SMTP_CONFIG,
+            email_config=EMAIL_CONFIG,
             to_address=args.get("to_address", ""),
             subject=args.get("subject", ""),
             body=args.get("body", ""),
@@ -282,7 +279,7 @@ def chat(request: ChatRequest, http_request: Request):
             {"role": "user", "content": clean_message},
         ]
 
-        tools = [EMAIL_TOOL_SCHEMA] if SMTP_CONFIGURED else None
+        tools = [EMAIL_TOOL_SCHEMA] if EMAIL_CONFIGURED else None
 
         print("[timing] appel Groq demarre...", flush=True)
         t0 = time.time()
@@ -333,7 +330,7 @@ def chat(request: ChatRequest, http_request: Request):
 
 @app.get("/health")
 def health_check():
-    return {"status": "ok", "smtp_configured": SMTP_CONFIGURED}
+    return {"status": "ok", "email_configured": EMAIL_CONFIGURED}
 
 
 if __name__ == "__main__":
