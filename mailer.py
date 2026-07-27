@@ -1,203 +1,140 @@
 """
-MAILER — Envoi d'emails via SMTP avec garde-fous anti-abus.
-Ce module tourne côté BACKEND (Render). Les credentials SMTP ne doivent
-JAMAIS être exposés côté frontend (Streamlit Cloud).
+MAILER - envoi d'emails via l'API HTTP de SendGrid (pas de SMTP).
+
+POURQUOI L'API HTTP ET NON SMTP :
+Beaucoup d'hebergeurs cloud gratuits (Render inclus, depuis fin 2025) bloquent
+le trafic sortant vers les ports SMTP (25, 465, 587) pour limiter les abus
+(voir https://render.com/changelog - "Free web services will no longer allow
+outbound traffic to SMTP ports"). L'API SendGrid passe par HTTPS (port 443,
+jamais bloque), donc ca fonctionne sur les plans gratuits.
+
+SendGrid necessite un "Single Sender" verifie : une adresse email dont vous
+confirmez la propriete via un lien recu par email (sur sendgrid.com :
+Settings > Sender Authentication > Single Sender Verification). Ca ne
+necessite AUCUN acces DNS - contrairement a la verification de domaine
+complete, qui est recommandee plus tard pour une meilleure delivrabilite
+mais pas obligatoire pour demarrer. Limite gratuite : 100 emails/jour.
+
+ATTENTION SECURITE (inchange depuis la version SMTP) :
+Ce module permet a un visiteur (via le chatbot) de faire envoyer un email a
+une adresse de son choix. C'est un vecteur d'abus classique (spam, phishing,
+harcelement) si aucune limite n'est mise. Les protections ci-dessous sont un
+MINIMUM pour un usage de test / petite echelle :
+  - limite de debit par IP (RATE_LIMIT_MAX_EMAILS par RATE_LIMIT_WINDOW_SECONDS)
+  - validation stricte du format d'email
+  - objet toujours prefixe pour distinguer ces envois du reste de la boite mail
+  - log de chaque tentative (data/email_log.jsonl) pour audit / detection d'abus
+
+Pour une mise en production reelle, il faudra en plus :
+  - remplacer le rate-limiter en memoire par un systeme partage (Redis)
+  - ajouter un captcha cote frontend avant meme d'atteindre ce module
+  - passer a une verification de domaine complete (SPF/DKIM) pour la
+    delivrabilite, une fois que vous aurez acces aux DNS de robocare.tn
 """
 
-from __future__ import annotations
-
 import json
-import os
 import re
-import smtplib
 import time
 from collections import defaultdict
-from email.mime.text import MIMEText
 from pathlib import Path
 from threading import Lock
-from typing import Any
 
-# --------------------------------------------------------------------------
-# CONSTANTES
-# --------------------------------------------------------------------------
+import requests
+
 EMAIL_REGEX = re.compile(r"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$")
 
 RATE_LIMIT_MAX_EMAILS = 3
-RATE_LIMIT_WINDOW_SECONDS = 3600
+RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 heure
+
 SUBJECT_PREFIX = "[Chatbot RoboCare] "
+LOG_FILE = Path("data/email_log.jsonl")
+SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
 
-# Chemin absolu (Render utilise /opt/render/project/...)
-LOG_FILE = Path(__file__).parent / "data" / "email_log.jsonl"
-
-# --------------------------------------------------------------------------
-# RATE LIMITER (en mémoire — remplacer par Redis en production multi-instance)
-# --------------------------------------------------------------------------
 _rate_limit_lock = Lock()
-_send_history: defaultdict[str, list[float]] = defaultdict(list)
+_send_history = defaultdict(list)  # ip -> [timestamps des envois recents]
 
 
 class EmailSendError(Exception):
-    """Exception métier renvoyée au chatbot pour feedback utilisateur."""
+    """Erreur explicite renvoyee au chatbot (et donc a l'utilisateur) en cas
+    d'echec, pour que le modele puisse expliquer clairement ce qui s'est passe."""
     pass
 
 
-def _sanitize_header(value: str) -> str:
-    """Supprime les caractères d'injection d'en-têtes (CR, LF, NULL)."""
-    return value.replace("\r", "").replace("\n", "").replace("\0", "")
-
-
-def _check_rate_limit(sender_ip: str) -> None:
+def _check_rate_limit(sender_ip: str):
     now = time.time()
     with _rate_limit_lock:
         history = _send_history[sender_ip]
-        cutoff = now - RATE_LIMIT_WINDOW_SECONDS
-        history[:] = [t for t in history if t > cutoff]
-
+        history[:] = [t for t in history if now - t < RATE_LIMIT_WINDOW_SECONDS]
         if len(history) >= RATE_LIMIT_MAX_EMAILS:
-            _log_attempt(sender_ip, "", "", False, "rate_limit_exceeded")
             raise EmailSendError(
                 f"Limite atteinte : maximum {RATE_LIMIT_MAX_EMAILS} emails "
-                f"par heure par visiteur. Réessayez plus tard."
+                f"par heure par visiteur. Reessayez plus tard."
             )
         history.append(now)
 
 
-def _log_attempt(
-    sender_ip: str,
-    to_address: str,
-    subject: str,
-    success: bool,
-    error: str | None = None,
-) -> None:
-    try:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        entry: dict[str, Any] = {
-            "timestamp": time.time(),
-            "sender_ip": sender_ip,
-            "to": to_address,
-            "subject": subject,
-            "success": success,
-            "error": error,
-        }
-        with open(LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError as exc:
-        import logging
-        logging.getLogger("robocare.mailer").warning(f"Impossible d'écrire le log : {exc}")
-
-
-def _validate_smtp_config(cfg: dict[str, Any]) -> dict[str, Any]:
-    required = {"host", "port", "user", "password", "from_addr"}
-    missing = required - set(cfg.keys())
-    if missing:
-        raise EmailSendError(f"Configuration SMTP incomplète : {missing}")
-
-    # Vérifier qu'aucun champ critique n'est vide
-    for key in required:
-        if not str(cfg.get(key, "")).strip():
-            raise EmailSendError(f"Configuration SMTP invalide : '{key}' est vide.")
-
-    return {
-        "host": str(cfg["host"]).strip(),
-        "port": int(cfg["port"]),
-        "user": str(cfg["user"]).strip(),
-        "password": str(cfg["password"]),
-        "from_addr": str(cfg["from_addr"]).strip(),
+def _log_attempt(sender_ip, to_address, subject, success, error=None):
+    LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+    entry = {
+        "timestamp": time.time(),
+        "sender_ip": sender_ip,
+        "to": to_address,
+        "subject": subject,
+        "success": success,
+        "error": error,
     }
+    with open(LOG_FILE, "a", encoding="utf-8") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
-def get_smtp_config() -> dict[str, Any]:
+def send_email(email_config: dict, to_address: str, subject: str, body: str, sender_ip: str = "unknown"):
     """
-    Charge la configuration SMTP depuis les variables d'environnement (Render).
-    
-    Variables attendues dans Render Dashboard → Environment :
-        SMTP_HOST=smtp.gmail.com
-        SMTP_PORT=587
-        SMTP_USER=jarraya616@gmail.com
-        SMTP_PASSWORD=votre_mot_de_passe_app_gmail
-        SMTP_FROM=jarraya616@gmail.com
+    email_config attendu :
+        {"api_key": "SG.xxxx", "sender_email": "verified@robocare.tn"}
+    (sender_email doit etre l'adresse verifiee via Single Sender Verification
+    sur le dashboard SendGrid)
+
+    Leve EmailSendError (avec un message clair, prevu pour etre lu par le
+    modele puis reformule a l'utilisateur) en cas de probleme : limite
+    atteinte, adresse invalide, ou echec technique de l'envoi.
     """
-    return {
-        "host": os.environ.get("SMTP_HOST", "smtp.gmail.com"),
-        "port": int(os.environ.get("SMTP_PORT", 587)),
-        "user": os.environ.get("SMTP_USER", ""),
-        "password": os.environ.get("SMTP_PASSWORD", ""),
-        "from_addr": os.environ.get("SMTP_FROM", os.environ.get("SMTP_USER", "")),
-    }
-
-
-def send_email(
-    to_address: str,
-    subject: str,
-    body: str,
-    sender_ip: str = "unknown",
-    smtp_config: dict[str, Any] | None = None,
-) -> bool:
-    """
-    Envoie un email via SMTP.
-
-    Args:
-        to_address: destinataire
-        subject: objet (préfixé automatiquement)
-        body: corps du message
-        sender_ip: IP du visiteur pour le rate limiting
-        smtp_config: config SMTP (charge depuis l'env par défaut)
-
-    Returns:
-        True si succès.
-
-    Raises:
-        EmailSendError: adresse invalide, rate limit, ou échec SMTP.
-    """
-    # Charger la config si non fournie
-    cfg = _validate_smtp_config(smtp_config or get_smtp_config())
-
-    # Validation destinataire
     to_address = (to_address or "").strip()
     if not EMAIL_REGEX.match(to_address):
         _log_attempt(sender_ip, to_address, subject, False, "adresse invalide")
         raise EmailSendError(f"L'adresse '{to_address}' n'est pas une adresse email valide.")
 
-    # Rate limit
-    _check_rate_limit(sender_ip)
+    _check_rate_limit(sender_ip)  # leve EmailSendError si depasse (deja logue dedans)
 
-    # Construction du message
-    clean_subject = _sanitize_header(subject.strip() if subject else "Message du chatbot")
-    full_subject = SUBJECT_PREFIX + clean_subject
+    full_subject = SUBJECT_PREFIX + (subject.strip() if subject else "Message du chatbot")
 
-    msg = MIMEText(body or "", "plain", "utf-8")
-    msg["Subject"] = full_subject
-    msg["From"] = cfg["from_addr"]
-    msg["To"] = to_address
+    payload = {
+        "personalizations": [{"to": [{"email": to_address}]}],
+        "from": {"email": email_config["sender_email"]},
+        "subject": full_subject,
+        "content": [{"type": "text/plain", "value": body or ""}],
+    }
 
-    # Envoi SMTP
     try:
-        with smtplib.SMTP(cfg["host"], cfg["port"], timeout=15) as server:
-            server.starttls()
-            server.login(cfg["user"], cfg["password"])
-            server.sendmail(cfg["from_addr"], [to_address], msg.as_string())
-
-    except smtplib.SMTPAuthenticationError:
-        _log_attempt(sender_ip, to_address, full_subject, False, "auth_error")
-        raise EmailSendError(
-            "Échec d'authentification SMTP. Vérifiez le mot de passe (mot de passe d'application Gmail requis)."
+        resp = requests.post(
+            SENDGRID_API_URL,
+            headers={
+                "Authorization": f"Bearer {email_config['api_key']}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=15,
         )
+        # SendGrid renvoie 202 Accepted en cas de succes (pas 200)
+        if resp.status_code not in (200, 202):
+            raise EmailSendError(
+                f"SendGrid a refuse l'envoi (code {resp.status_code}) : {resp.text[:200]}"
+            )
+    except requests.RequestException as e:
+        _log_attempt(sender_ip, to_address, subject, False, str(e))
+        raise EmailSendError(f"Echec technique de l'envoi : {e}")
+    except EmailSendError as e:
+        _log_attempt(sender_ip, to_address, subject, False, str(e))
+        raise
 
-    except smtplib.SMTPConnectError:
-        _log_attempt(sender_ip, to_address, full_subject, False, "connexion_error")
-        raise EmailSendError(f"Impossible de se connecter au serveur SMTP ({cfg['host']}).")
-
-    except smtplib.SMTPRecipientsRefused:
-        _log_attempt(sender_ip, to_address, full_subject, False, "recipient_refused")
-        raise EmailSendError(f"Le serveur a refusé le destinataire '{to_address}'.")
-
-    except smtplib.SMTPException as exc:
-        _log_attempt(sender_ip, to_address, full_subject, False, f"smtp_error: {exc}")
-        raise EmailSendError(f"Erreur SMTP : {exc}")
-
-    except Exception as exc:
-        _log_attempt(sender_ip, to_address, full_subject, False, f"unexpected: {exc}")
-        raise EmailSendError(f"Échec technique de l'envoi : {exc}")
-
-    _log_attempt(sender_ip, to_address, full_subject, True)
+    _log_attempt(sender_ip, to_address, subject, True)
     return True
