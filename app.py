@@ -1,5 +1,6 @@
 """
 Interface de chat RoboCare — Version professionnelle Streamlit.
+Compatible mode clair & mode sombre.
 
 Nécessite que le serveur FastAPI tourne en parallèle :
     uvicorn chatbot:app --reload
@@ -7,7 +8,7 @@ Nécessite que le serveur FastAPI tourne en parallèle :
 Lancement de cette interface (dans un AUTRE terminal) :
     streamlit run app.py
 
-Logo attendu dans : assets/robocare.png
+Logo attendu dans : assets/robocare.png (fallback racine)
 """
 
 from __future__ import annotations
@@ -15,7 +16,6 @@ from __future__ import annotations
 import base64
 import logging
 import os
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -38,24 +38,17 @@ logger = logging.getLogger("robocare_ui")
 class Config:
     """Configuration centralisée de l'application."""
 
-    # Répertoire racine du script
     BASE_DIR: Path = Path(__file__).parent.resolve()
-
-    # Chemin du logo (priorité : assets/robocare.png, fallback robocare.png)
     LOGO_PATH: Path = BASE_DIR / "robocare.png"
     if not LOGO_PATH.exists():
         LOGO_PATH = BASE_DIR / "robocare.png"
 
-    # URL de l'API (priorité : secrets Streamlit > variable d'env > localhost)
     API_URL: str = st.secrets.get(
         "API_URL",
         os.environ.get("API_URL", "http://127.0.0.1:8000/chat"),
     )
-
-    # Timeout pour les requêtes API (secondes)
     TIMEOUT: int = 60
 
-    # Coordonnées entreprise (vérifiées via scraping)
     COMPANY: dict[str, str] = {
         "phone": "+216 53 140 011",
         "email": "contact@robocare.tn",
@@ -74,10 +67,7 @@ class Config:
 # UTILITAIRES
 # --------------------------------------------------------------------------
 def load_logo_base64(path: Path) -> str | None:
-    """
-    Charge une image et la retourne en base64 pour intégration HTML.
-    Retourne None si le fichier n'existe pas.
-    """
+    """Charge une image et la retourne en base64. Retourne None si introuvable."""
     if not path.exists():
         logger.warning(f"Logo introuvable : {path}")
         return None
@@ -89,17 +79,12 @@ def load_logo_base64(path: Path) -> str | None:
 
 
 def validate_api_url(url: str) -> bool:
-    """Vérifie que l'URL de l'API est valide (non vide et format correct)."""
-    if not url or not url.strip():
-        return False
-    return url.startswith(("http://", "https://"))
+    """Vérifie que l'URL de l'API est valide."""
+    return bool(url and url.strip() and url.startswith(("http://", "https://")))
 
 
 def call_chatbot_api(question: str, api_url: str, timeout: int) -> dict[str, Any]:
-    """
-    Envoie une question à l'API FastAPI et retourne la réponse structurée.
-    Lève une exception en cas d'erreur réseau ou HTTP.
-    """
+    """Envoie une question à l'API FastAPI et retourne la réponse JSON."""
     payload = {"message": question}
     response = requests.post(api_url, json=payload, timeout=timeout)
     response.raise_for_status()
@@ -107,10 +92,13 @@ def call_chatbot_api(question: str, api_url: str, timeout: int) -> dict[str, Any
 
 
 # --------------------------------------------------------------------------
-# STYLES CSS PERSONNALISÉS
+# STYLES CSS — Compatible Clair & Sombre
 # --------------------------------------------------------------------------
 def inject_custom_css() -> None:
-    """Injecte les styles CSS de l'identité visuelle RoboCare."""
+    """
+    Injecte les styles CSS de l'identité visuelle RoboCare.
+    Utilise les variables Streamlit natives pour s'adapter au thème actif.
+    """
     css = """
     @import url('https://fonts.googleapis.com/css2?family=Sora:wght@600;700&family=Inter:wght@400;500;600&display=swap');
 
@@ -118,22 +106,17 @@ def inject_custom_css() -> None:
         --rc-forest: #1B4332;
         --rc-forest-light: #2D6A4F;
         --rc-leaf: #52B788;
-        --rc-sage-bg: #F3F7F4;
         --rc-soil: #7A5230;
         --rc-sky: #2D6A8F;
-        --rc-ink: #1A2E23;
-        --rc-error: #C0392B;
     }
 
     html, body, [class*="css"] {
         font-family: 'Inter', sans-serif;
     }
 
-    .stApp {
-        background: var(--rc-sage-bg);
-    }
-
-    /* Bandeau d'en-tête */
+    /* ================================================================
+       HEADER — fond dégradé propre, texte blanc forcé (élément isolé)
+       ================================================================ */
     .rc-header {
         background: linear-gradient(135deg, var(--rc-forest) 0%, var(--rc-forest-light) 100%);
         border-radius: 14px;
@@ -152,19 +135,19 @@ def inject_custom_css() -> None:
     }
     .rc-header-text h1 {
         font-family: 'Sora', sans-serif;
-        color: white;
+        color: #FFFFFF !important;
         font-size: 1.35rem;
         font-weight: 700;
         margin: 0;
         letter-spacing: -0.01em;
     }
     .rc-header-text p {
-        color: #CDE7D8;
+        color: #CDE7D8 !important;
         font-size: 0.85rem;
         margin: 0.15rem 0 0 0;
     }
 
-    /* Ligne de scan satellite animée */
+    /* Ligne de scan animée */
     .rc-scanline {
         height: 3px;
         margin-bottom: 1.5rem;
@@ -182,38 +165,28 @@ def inject_custom_css() -> None:
         .rc-scanline { animation: none; }
     }
 
-    /* Bulles de chat */
+    /* ================================================================
+       CHAT — on laisse Streamlit gérer le fond, on ajoute juste l'accent
+       ================================================================ */
     [data-testid="stChatMessage"] {
         border-radius: 12px;
-        border: 1px solid rgba(27, 67, 50, 0.08);
+        border: 1px solid rgba(128, 128, 128, 0.15);
     }
 
-    /* Boutons */
-    .stButton > button {
-        background: var(--rc-forest);
-        color: white;
-        border-radius: 8px;
-        border: none;
-        font-weight: 500;
-        transition: all 0.2s ease;
-    }
-    .stButton > button:hover {
-        background: var(--rc-leaf);
-        color: var(--rc-forest);
-    }
-
-    /* Sidebar */
+    /* ================================================================
+       SIDEBAR — utilise les couleurs natives Streamlit
+       ================================================================ */
     [data-testid="stSidebar"] {
-        background: white;
-        border-right: 1px solid rgba(27, 67, 50, 0.08);
+        border-right: 1px solid rgba(128, 128, 128, 0.12);
     }
+
     .rc-contact-card {
-        background: var(--rc-sage-bg);
+        background: rgba(128, 128, 128, 0.08);
         border-radius: 10px;
         padding: 1rem;
         font-size: 0.85rem;
         line-height: 1.6;
-        color: var(--rc-ink);
+        color: var(--text-color);
     }
     .rc-contact-card a {
         color: var(--rc-sky);
@@ -224,11 +197,27 @@ def inject_custom_css() -> None:
         text-decoration: underline;
     }
 
-    /* Alertes personnalisées */
-    .rc-alert {
+    /* ================================================================
+       BOUTONS — adaptatifs
+       ================================================================ */
+    .stButton > button {
+        background: var(--rc-forest);
+        color: white;
         border-radius: 8px;
-        padding: 0.75rem 1rem;
-        margin-bottom: 1rem;
+        border: none;
+        font-weight: 500;
+        transition: all 0.2s ease;
+    }
+    .stButton > button:hover {
+        background: var(--rc-leaf);
+        color: #1B4332;
+    }
+
+    /* ================================================================
+       FIX : texte du chat visible dans les deux modes
+       ================================================================ */
+    .stMarkdown p, .stMarkdown span {
+        color: var(--text-color);
     }
     """
     st.markdown(f"<style>{css}</style>", unsafe_allow_html=True)
@@ -243,7 +232,7 @@ def render_header(logo_b64: str | None) -> None:
     if logo_b64:
         logo_html = (
             f'<img src="data:image/png;base64,{logo_b64}" '
-            f'alt="Logo RoboCare" title="RoboCare">'
+            f'alt="Logo RoboCare">'
         )
 
     st.markdown(
@@ -263,7 +252,7 @@ def render_header(logo_b64: str | None) -> None:
     if not logo_b64:
         st.info(
             "💡 Logo non trouvé (`assets/robocare.png` ou `robocare.png`). "
-            "Placez votre logo à l'un de ces emplacements pour qu'il s'affiche.",
+            "Placez votre logo à l'un de ces emplacements.",
             icon="🖼️",
         )
 
@@ -271,11 +260,9 @@ def render_header(logo_b64: str | None) -> None:
 def render_sidebar(config: Config) -> None:
     """Affiche la sidebar avec contact et contrôles."""
     with st.sidebar:
-        # Logo dans la sidebar
         if config.LOGO_PATH.exists():
             st.image(str(config.LOGO_PATH), use_container_width=True)
 
-        # Carte de contact
         st.markdown("### 📍 Nous contacter")
         phone_clean = config.COMPANY["phone"].replace(" ", "")
         st.markdown(
@@ -304,7 +291,6 @@ def render_sidebar(config: Config) -> None:
 
         st.markdown("---")
 
-        # Réinitialisation conversation
         if st.button("🔄 Nouvelle conversation", use_container_width=True):
             st.session_state.messages = []
             st.rerun()
@@ -329,12 +315,10 @@ def handle_user_input(config: Config) -> None:
     if not question:
         return
 
-    # Ajout message utilisateur
     st.session_state.messages.append({"role": "user", "content": question})
     with st.chat_message("user"):
         st.markdown(question)
 
-    # Réponse du chatbot
     with st.chat_message("assistant"):
         with st.spinner(
             "Recherche en cours... "
@@ -371,13 +355,11 @@ def handle_user_input(config: Config) -> None:
                 error_msg = (
                     "❌ **Impossible de contacter le serveur.**\n\n"
                     "Vérifiez que le serveur FastAPI est bien lancé :\n"
-                    "```bash\nuvicorn chatbot:app --reload\n```\n"
-                    "Si vous utilisez Render, assurez-vous que le service est en ligne."
+                    "```bash\nuvicorn chatbot:app --reload\n```"
                 )
                 st.error(error_msg)
                 st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
+                    "role": "assistant", "content": error_msg,
                 })
 
             except requests.exceptions.ReadTimeout as exc:
@@ -388,17 +370,15 @@ def handle_user_input(config: Config) -> None:
                 )
                 st.warning(error_msg)
                 st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
+                    "role": "assistant", "content": error_msg,
                 })
 
             except requests.exceptions.HTTPError as exc:
                 logger.error(f"Erreur HTTP : {exc}")
-                error_msg = f"⚠️ **Erreur serveur** : {exc.response.status_code}\n\n```\n{exc.response.text}\n```"
+                error_msg = f"⚠️ **Erreur serveur** : {exc.response.status_code}\n\n```{exc.response.text}```"
                 st.error(error_msg)
                 st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
+                    "role": "assistant", "content": error_msg,
                 })
 
             except Exception as exc:
@@ -406,17 +386,15 @@ def handle_user_input(config: Config) -> None:
                 error_msg = f"🚨 **Erreur inattendue** : `{type(exc).__name__}`\n\n{str(exc)}"
                 st.error(error_msg)
                 st.session_state.messages.append({
-                    "role": "assistant",
-                    "content": error_msg,
+                    "role": "assistant", "content": error_msg,
                 })
 
 
 # --------------------------------------------------------------------------
-# POINT D'ENTRÉE PRINCIPAL
+# POINT D'ENTRÉE
 # --------------------------------------------------------------------------
 def main() -> None:
     """Fonction principale de l'application Streamlit."""
-    # Configuration de la page (DOIT être le premier appel Streamlit)
     config = Config()
 
     page_icon = str(config.LOGO_PATH) if config.LOGO_PATH.exists() else "🛰️"
@@ -427,23 +405,14 @@ def main() -> None:
         initial_sidebar_state="expanded",
     )
 
-    # Injection CSS
     inject_custom_css()
-
-    # Chargement du logo
     logo_b64 = load_logo_base64(config.LOGO_PATH)
-
-    # En-tête
     render_header(logo_b64)
-
-    # Sidebar
     render_sidebar(config)
 
-    # Initialisation de l'historique
     if "messages" not in st.session_state:
         st.session_state.messages = []
 
-    # Message de bienvenue (première visite)
     if not st.session_state.messages:
         welcome_msg = (
             "👋 Bienvenue ! Je suis l'assistant virtuel de **RoboCare**. "
@@ -456,10 +425,7 @@ def main() -> None:
             "sources": [],
         })
 
-    # Affichage de l'historique
     render_chat_history()
-
-    # Gestion de la saisie
     handle_user_input(config)
 
 
