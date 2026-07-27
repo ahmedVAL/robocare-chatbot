@@ -98,13 +98,42 @@ if not groq_api_key:
     raise RuntimeError("La variable d'environnement GROQ_API_KEY n'est pas definie.")
 groq_client = Groq(api_key=groq_api_key)
 
-EMAIL_CONFIG = {
-    "api_key": os.environ.get("SENDGRID_API_KEY"),
-    "sender_email": os.environ.get("SENDGRID_FROM_EMAIL"),
-}
-EMAIL_CONFIGURED = all([EMAIL_CONFIG["api_key"], EMAIL_CONFIG["sender_email"]])
+def _build_email_config():
+    """Choisit automatiquement la methode d'envoi selon ce qui est defini
+    dans .env : SendGrid en priorite (production/Render), sinon SMTP en
+    repli (local, ou vous avez deja un compte Gmail teste)."""
+    sendgrid_key = os.environ.get("SENDGRID_API_KEY")
+    sendgrid_from = os.environ.get("SENDGRID_FROM_EMAIL")
+    if sendgrid_key and sendgrid_from:
+        print("[email] Methode active : SendGrid (API HTTP)", flush=True)
+        return {"method": "sendgrid", "api_key": sendgrid_key, "sender_email": sendgrid_from}
+
+    smtp_host = os.environ.get("SMTP_HOST")
+    smtp_user = os.environ.get("SMTP_USER")
+    smtp_password = os.environ.get("SMTP_PASSWORD")
+    smtp_from = os.environ.get("SMTP_FROM")
+    if smtp_host and smtp_user and smtp_password and smtp_from:
+        print("[email] Methode active : SMTP", flush=True)
+        return {
+            "method": "smtp",
+            "host": smtp_host,
+            "port": os.environ.get("SMTP_PORT", "587"),
+            "user": smtp_user,
+            "password": smtp_password,
+            "from_addr": smtp_from,
+        }
+
+    return None
+
+
+EMAIL_CONFIG = _build_email_config()
+EMAIL_CONFIGURED = EMAIL_CONFIG is not None
 if not EMAIL_CONFIGURED:
-    print("⚠️  SendGrid non configure dans .env : l'envoi d'email sera indisponible.", flush=True)
+    print(
+        "⚠️  Aucune config email valide dans .env (ni SENDGRID_*, ni SMTP_*) : "
+        "l'envoi d'email sera indisponible.",
+        flush=True,
+    )
 
 SYSTEM_PROMPT_TEMPLATE = """Tu es l'assistant virtuel officiel du site web de l'entreprise.
 
