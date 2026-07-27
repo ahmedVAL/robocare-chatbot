@@ -29,7 +29,7 @@ SMTP_FROM = os.getenv("EMAIL_FROM", SMTP_USERNAME)
 # ==========================
 
 if not SMTP_USER:
-    raise RuntimeError("SMTP_USERNAME est introuvable.")
+    raise RuntimeError("SMTP_USER est introuvable.")
 
 if not SMTP_PASSWORD:
     raise RuntimeError("SMTP_PASSWORD est introuvable.")
