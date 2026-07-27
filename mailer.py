@@ -18,17 +18,17 @@ load_dotenv()
 # Configuration SMTP
 # ==========================
 
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+SMTP_SERVER = os.getenv("SMTP_HOST", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", 587))
-SMTP_USERNAME = os.getenv("SMTP_USERNAME")
+SMTP_USER = os.getenv("SMTP_USER")
 SMTP_PASSWORD = os.getenv("SMTP_PASSWORD")
-EMAIL_FROM = os.getenv("EMAIL_FROM", SMTP_USERNAME)
+SMTP_FROM = os.getenv("EMAIL_FROM", SMTP_USERNAME)
 
 # ==========================
 # Vérification
 # ==========================
 
-if not SMTP_USERNAME:
+if not SMTP_USER:
     raise RuntimeError("SMTP_USERNAME est introuvable.")
 
 if not SMTP_PASSWORD:
