@@ -100,8 +100,14 @@ groq_client = Groq(api_key=groq_api_key)
 
 def _build_email_config():
     """Choisit automatiquement la methode d'envoi selon ce qui est defini
-    dans .env : SendGrid en priorite (production/Render), sinon SMTP en
-    repli (local, ou vous avez deja un compte Gmail teste)."""
+    dans .env, par ordre de priorite : Brevo, puis SendGrid, puis SMTP
+    (utilise en local, ou vous avez deja un compte Gmail teste)."""
+    brevo_key = os.environ.get("BREVO_API_KEY")
+    brevo_from = os.environ.get("BREVO_FROM_EMAIL")
+    if brevo_key and brevo_from:
+        print("[email] Methode active : Brevo (API HTTP)", flush=True)
+        return {"method": "brevo", "api_key": brevo_key, "sender_email": brevo_from}
+
     sendgrid_key = os.environ.get("SENDGRID_API_KEY")
     sendgrid_from = os.environ.get("SENDGRID_FROM_EMAIL")
     if sendgrid_key and sendgrid_from:
