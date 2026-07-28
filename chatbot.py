@@ -274,9 +274,22 @@ def run_with_timeout(fn, *args, **kwargs):
         )
 
 
+def get_client_ip(http_request: Request) -> str:
+    """Recupere la vraie IP du visiteur. Sur Render (et la plupart des PaaS),
+    les requetes passent par un proxy interne : http_request.client.host
+    renverrait alors l'IP du proxy, IDENTIQUE pour tous les visiteurs - ce
+    qui casserait le rate-limiting par IP (tout le monde partagerait le
+    meme quota). Le proxy ajoute l'IP reelle dans l'en-tete X-Forwarded-For."""
+    forwarded_for = http_request.headers.get("x-forwarded-for")
+    if forwarded_for:
+        # Le premier maillon de la liste est l'IP originale du client
+        return forwarded_for.split(",")[0].strip()
+    return http_request.client.host if http_request.client else "unknown"
+
+
 @app.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest, http_request: Request):
-    sender_ip = http_request.client.host if http_request.client else "unknown"
+    sender_ip = get_client_ip(http_request)
 
     # --- Couche de securite : validation + rate limit, avant tout traitement ---
     try:
