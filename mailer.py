@@ -1,26 +1,25 @@
 """
-MAILER - envoi d'emails, avec DEUX methodes selon l'environnement :
+MAILER - envoi d'emails, avec TROIS methodes possibles selon l'environnement :
 
-  1. SMTP classique (Gmail...) - fonctionne en local, mais BLOQUE sur les
+  1. Brevo (ex-Sendinblue) - API HTTP, plan gratuit 300 emails/jour, sans
+     carte bancaire, sans lien avec Twilio. Recommande pour Render.
+  2. SendGrid - API HTTP egalement (appartient a Twilio, inscription parfois
+     plus contraignante selon le pays). Garde en option si deja configure.
+  3. SMTP classique (Gmail...) - fonctionne en local, mais BLOQUE sur les
      services cloud gratuits comme Render (voir leur changelog : "Free web
      services will no longer allow outbound traffic to SMTP ports").
-  2. API HTTP SendGrid - passe par HTTPS (port 443, jamais bloque), donc
-     fonctionne sur Render gratuit. Necessite un "Single Sender" verifie
-     (aucun acces DNS requis - juste confirmer un email de verification sur
-     sendgrid.com). Limite gratuite : 100 emails/jour.
 
 La methode utilisee est choisie automatiquement par chatbot.py selon les
-variables presentes dans .env :
-  - SENDGRID_API_KEY + SENDGRID_FROM_EMAIL definis -> SendGrid (priorite,
-    utilise en production sur Render)
-  - sinon SMTP_HOST + SMTP_USER + SMTP_PASSWORD + SMTP_FROM definis -> SMTP
-    (utilise en local, ou vous n'avez besoin que d'un compte Gmail)
+variables presentes dans .env, dans cet ordre de priorite :
+  1. BREVO_API_KEY + BREVO_FROM_EMAIL definis -> Brevo
+  2. sinon SENDGRID_API_KEY + SENDGRID_FROM_EMAIL definis -> SendGrid
+  3. sinon SMTP_HOST + SMTP_USER + SMTP_PASSWORD + SMTP_FROM definis -> SMTP
 
-Ainsi le meme code tourne en local (avec vos identifiants SMTP deja testes)
-et sur Render (avec SendGrid), sans rien changer dans le code lui-meme -
-seule la config .env differe selon l'environnement.
+Ainsi le meme code tourne en local (SMTP deja teste) et sur Render (Brevo ou
+SendGrid), sans rien changer dans le code lui-meme - seule la config .env
+differe selon l'environnement.
 
-ATTENTION SECURITE (inchange, s'applique aux deux methodes) :
+ATTENTION SECURITE (inchange, s'applique aux trois methodes) :
 Ce module permet a un visiteur (via le chatbot) de faire envoyer un email a
 une adresse de son choix. C'est un vecteur d'abus classique (spam, phishing,
 harcelement) si aucune limite n'est mise. Les protections ci-dessous sont un
@@ -54,6 +53,7 @@ RATE_LIMIT_WINDOW_SECONDS = 3600  # 1 heure
 SUBJECT_PREFIX = "[Chatbot RoboCare] "
 LOG_FILE = Path("data/email_log.jsonl")
 SENDGRID_API_URL = "https://api.sendgrid.com/v3/mail/send"
+BREVO_API_URL = "https://api.brevo.com/v3/smtp/email"
 
 _rate_limit_lock = Lock()
 _send_history = defaultdict(list)  # ip -> [timestamps des envois recents]
@@ -130,6 +130,30 @@ def _send_via_sendgrid(config: dict, to_address: str, full_subject: str, body: s
         )
 
 
+def _send_via_brevo(config: dict, to_address: str, full_subject: str, body: str):
+    """config attendu : {"api_key", "sender_email"}"""
+    payload = {
+        "sender": {"email": config["sender_email"]},
+        "to": [{"email": to_address}],
+        "subject": full_subject,
+        "textContent": body or "",
+    }
+    resp = requests.post(
+        BREVO_API_URL,
+        headers={
+            "api-key": config["api_key"],
+            "Content-Type": "application/json",
+        },
+        json=payload,
+        timeout=15,
+    )
+    # Brevo renvoie 201 Created en cas de succes
+    if resp.status_code not in (200, 201, 202):
+        raise EmailSendError(
+            f"Brevo a refuse l'envoi (code {resp.status_code}) : {resp.text[:200]}"
+        )
+
+
 def send_email(email_config: dict, to_address: str, subject: str, body: str, sender_ip: str = "unknown"):
     """
     email_config attendu, selon la methode :
@@ -152,7 +176,9 @@ def send_email(email_config: dict, to_address: str, subject: str, body: str, sen
     full_subject = SUBJECT_PREFIX + (subject.strip() if subject else "Message du chatbot")
 
     try:
-        if method == "sendgrid":
+        if method == "brevo":
+            _send_via_brevo(email_config, to_address, full_subject, body)
+        elif method == "sendgrid":
             _send_via_sendgrid(email_config, to_address, full_subject, body)
         elif method == "smtp":
             _send_via_smtp(email_config, to_address, full_subject, body)
